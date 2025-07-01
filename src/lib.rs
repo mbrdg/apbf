@@ -31,12 +31,12 @@ impl Add<Duration> for Refresh {
 
 impl AddAssign<Duration> for Refresh {
     fn add_assign(&mut self, rhs: Duration) {
-        self.0 += rhs
+        self.0 += rhs;
     }
 }
 
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 struct Seed(u64);
 
 impl Seed {
@@ -63,10 +63,12 @@ pub struct AgePartionedBloomFilter<T: ?Sized> {
 }
 
 impl<T> AgePartionedBloomFilter<T> {
+    #[must_use]
     pub fn new(k: NonZeroUsize, l: NonZeroUsize, generation_size: NonZeroUsize) -> Self {
         Self::with_refresh(k, l, generation_size, Duration::ZERO)
     }
 
+    #[must_use]
     pub fn with_refresh(
         k: NonZeroUsize,
         l: NonZeroUsize,
@@ -92,14 +94,17 @@ impl<T> AgePartionedBloomFilter<T> {
         }
     }
 
+    #[must_use]
     pub const fn slices(&self) -> usize {
         self.k.get() + self.l.get()
     }
 
+    #[must_use]
     const fn generations(&self) -> usize {
         self.l.get() + 1
     }
 
+    #[must_use]
     pub const fn capacity(&self) -> usize {
         self.generation_size.get() * self.generations()
     }
@@ -123,10 +128,6 @@ impl<T> AgePartionedBloomFilter<T> {
     {
         self.refresh();
 
-        assert_ne!(
-            self.seeds.0, self.seeds.1,
-            "hash functions must be independent"
-        );
         let h1 = self.seeds.0.builder().hash_one(value) as usize;
         let h2 = self.seeds.1.builder().hash_one(value) as usize;
 
@@ -160,7 +161,7 @@ impl<T> AgePartionedBloomFilter<T> {
         for i in lo..hi {
             let (byte, off) = (i / 8, i % 8);
             if let Some(b) = self.buf.get_mut(byte) {
-                *b &= !(1 << off)
+                *b &= !(1 << off);
             }
         }
     }
@@ -171,15 +172,11 @@ impl<T> AgePartionedBloomFilter<T> {
         Q: Eq + Hash + ?Sized,
     {
         if self.inserts == self.generation_size.get() {
-            self.shift()
+            self.shift();
         }
 
         self.inserts += 1;
 
-        assert_ne!(
-            self.seeds.0, self.seeds.1,
-            "hash functions must be independent"
-        );
         let h1 = self.seeds.0.builder().hash_one(value) as usize;
         let h2 = self.seeds.1.builder().hash_one(value) as usize;
 
@@ -194,6 +191,7 @@ impl<T> AgePartionedBloomFilter<T> {
         }
     }
 
+    #[must_use]
     pub fn fpr(k: NonZeroUsize, l: NonZeroUsize) -> f64 {
         let mut cache = HashMap::new();
         Self::fpr_rec(k.get(), l.get(), (0, 0), &mut cache)
@@ -213,13 +211,16 @@ impl<T> AgePartionedBloomFilter<T> {
             return *v;
         }
 
-        let mut ri = 0.5;
-        if i < k {
-            ri = (i + 1) as f64 / (2 * k) as f64;
-        }
+        let ri = if i < k {
+            (i + 1) as f64 / (2 * k) as f64
+        } else {
+            0.5
+        };
 
-        let value = ri * Self::fpr_rec(k, l, (a + 1, i + 1), cache)
-            + (1.0 - ri) * Self::fpr_rec(k, l, (0, i + 1), cache);
+        let value = ri.mul_add(
+            Self::fpr_rec(k, l, (a + 1, i + 1), cache),
+            (1.0 - ri) * Self::fpr_rec(k, l, (0, i + 1), cache),
+        );
         cache.insert(cache_key, value);
 
         value
