@@ -12,4 +12,4 @@ default = ["serde"]
 serde = []
 
 [dev-dependencies]
-serde_cbor = "0.11.2"
+ciborium = "0.2.2"

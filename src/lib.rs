@@ -128,6 +128,7 @@ impl<T> AgePartionedBloomFilter<T> {
     {
         self.refresh();
 
+        debug_assert_ne!(self.seeds.0, self.seeds.1, "not independent hash functions");
         let h1 = self.seeds.0.builder().hash_one(value) as usize;
         let h2 = self.seeds.1.builder().hash_one(value) as usize;
 
@@ -177,6 +178,7 @@ impl<T> AgePartionedBloomFilter<T> {
 
         self.inserts += 1;
 
+        debug_assert_ne!(self.seeds.0, self.seeds.1, "not independent hash functions");
         let h1 = self.seeds.0.builder().hash_one(value) as usize;
         let h2 = self.seeds.1.builder().hash_one(value) as usize;
 
@@ -322,9 +324,11 @@ mod tests {
 
         f.insert(&0);
 
-        let network = serde_cbor::to_vec(&f).unwrap();
-        let mut copy: AgePartionedBloomFilter<i32> =
-            serde_cbor::from_slice(network.as_slice()).unwrap();
+        let mut network = Vec::<u8>::new();
+        ciborium::into_writer(&f, &mut network).unwrap();
+
+        let mut copy: AgePartionedBloomFilter<u8> =
+            ciborium::from_reader(network.as_slice()).unwrap();
         assert!(copy.contains(&0), "item must be present in copy");
     }
 }
