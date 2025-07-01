@@ -2,24 +2,63 @@ use std::{
     borrow::Borrow,
     collections::HashMap,
     f64::consts::LOG2_E,
-    hash::{BuildHasher, Hash, RandomState},
+    hash::{BuildHasher, Hash},
     marker::PhantomData,
     num::NonZeroUsize,
+    ops::{Add, AddAssign},
     time::{Duration, Instant},
 };
 
+use foldhash::quality::FixedState;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Refresh(Instant);
+
+impl Default for Refresh {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+
+impl Add<Duration> for Refresh {
+    type Output = Self;
+
+    fn add(self, rhs: Duration) -> Self::Output {
+        Self(self.0 + rhs)
+    }
+}
+
+impl AddAssign<Duration> for Refresh {
+    fn add_assign(&mut self, rhs: Duration) {
+        self.0 += rhs
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Seed(u64);
+
+impl Seed {
+    fn builder(&self) -> impl BuildHasher {
+        FixedState::with_seed(self.0)
+    }
+}
+
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct AgePartionedBloomFilter<T: ?Sized> {
     k: NonZeroUsize,
     l: NonZeroUsize,
     generation_size: NonZeroUsize,
     inserts: usize,
     refresh_interval: Duration,
-    last_refresh: Instant,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    last_refresh: Refresh,
     buf: Vec<u8>,
     slice_bits: usize,
     index: usize,
-    hashers: (RandomState, RandomState),
+    seeds: (Seed, Seed),
     marker: PhantomData<T>,
 }
 
@@ -44,11 +83,11 @@ impl<T> AgePartionedBloomFilter<T> {
             generation_size,
             inserts: 0,
             refresh_interval,
-            last_refresh: Instant::now(),
+            last_refresh: Refresh::default(),
             buf: vec![0u8; buf_len],
             slice_bits,
             index: 0,
-            hashers: (RandomState::new(), RandomState::new()),
+            seeds: (Seed(42), Seed(24)),
             marker: PhantomData,
         }
     }
@@ -66,7 +105,7 @@ impl<T> AgePartionedBloomFilter<T> {
     }
 
     fn refresh(&mut self) {
-        let now = Instant::now();
+        let now = Refresh::default();
         if self.refresh_interval.is_zero() || self.last_refresh + self.refresh_interval > now {
             return;
         }
@@ -84,8 +123,12 @@ impl<T> AgePartionedBloomFilter<T> {
     {
         self.refresh();
 
-        let h1 = self.hashers.0.hash_one(value) as usize;
-        let h2 = self.hashers.1.hash_one(value) as usize;
+        assert_ne!(
+            self.seeds.0, self.seeds.1,
+            "hash functions must be independent"
+        );
+        let h1 = self.seeds.0.builder().hash_one(value) as usize;
+        let h2 = self.seeds.1.builder().hash_one(value) as usize;
 
         let mut matches = 0;
         for i in 0..self.slices() {
@@ -133,8 +176,12 @@ impl<T> AgePartionedBloomFilter<T> {
 
         self.inserts += 1;
 
-        let h1 = self.hashers.0.hash_one(value) as usize;
-        let h2 = self.hashers.1.hash_one(value) as usize;
+        assert_ne!(
+            self.seeds.0, self.seeds.1,
+            "hash functions must be independent"
+        );
+        let h1 = self.seeds.0.builder().hash_one(value) as usize;
+        let h2 = self.seeds.1.builder().hash_one(value) as usize;
 
         for k in 0..self.k.get() {
             let i = (self.index + k) % self.slices();
@@ -261,5 +308,22 @@ mod tests {
         }
 
         assert!(!f.contains(&0), "item should be evicted by this time");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn snapshot() {
+        let mut f = AgePartionedBloomFilter::<i32>::new(
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(10).unwrap(),
+        );
+
+        f.insert(&0);
+
+        let network = serde_cbor::to_vec(&f).unwrap();
+        let mut copy: AgePartionedBloomFilter<i32> =
+            serde_cbor::from_slice(network.as_slice()).unwrap();
+        assert!(copy.contains(&0), "item must be present in copy");
     }
 }

@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+foldhash = "0.1.5"
+serde = { version = "1.0", features = ["derive"] }
+
+[features]
+default = ["serde"]
+serde = []
+
+[dev-dependencies]
+serde_cbor = "0.11.2"
