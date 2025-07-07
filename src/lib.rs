@@ -2,14 +2,15 @@ use std::{
     borrow::Borrow,
     collections::HashMap,
     f64::consts::LOG2_E,
-    hash::{BuildHasher, Hash},
+    hash::{BuildHasher, Hash, Hasher, RandomState},
     marker::PhantomData,
     num::NonZeroUsize,
     ops::{Add, AddAssign},
     time::{Duration, Instant},
 };
 
-use foldhash::quality::FixedState;
+use foldhash::fast::FixedState;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,16 +36,6 @@ impl AddAssign<Duration> for Refresh {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-struct Seed(u64);
-
-impl Seed {
-    fn builder(&self) -> impl BuildHasher {
-        FixedState::with_seed(self.0)
-    }
-}
-
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 pub struct AgePartionedBloomFilter<T: ?Sized> {
@@ -58,7 +49,7 @@ pub struct AgePartionedBloomFilter<T: ?Sized> {
     buf: Vec<u8>,
     slice_bits: usize,
     index: usize,
-    seeds: (Seed, Seed),
+    seeds: (u64, u64),
     marker: PhantomData<T>,
 }
 
@@ -69,15 +60,42 @@ impl<T> AgePartionedBloomFilter<T> {
     }
 
     #[must_use]
+    pub fn with_seeds(
+        k: NonZeroUsize,
+        l: NonZeroUsize,
+        generation_size: NonZeroUsize,
+        seeds: (u64, u64),
+    ) -> Self {
+        Self::with_refresh_and_seeds(k, l, generation_size, Duration::ZERO, seeds)
+    }
+
+    #[must_use]
     pub fn with_refresh(
         k: NonZeroUsize,
         l: NonZeroUsize,
         generation_size: NonZeroUsize,
         refresh_interval: Duration,
     ) -> Self {
+        let seeds = (
+            RandomState::new().build_hasher().finish(),
+            RandomState::new().build_hasher().finish(),
+        );
+
+        Self::with_refresh_and_seeds(k, l, generation_size, refresh_interval, seeds)
+    }
+
+    #[must_use]
+    pub fn with_refresh_and_seeds(
+        k: NonZeroUsize,
+        l: NonZeroUsize,
+        generation_size: NonZeroUsize,
+        refresh_interval: Duration,
+        seeds: (u64, u64),
+    ) -> Self {
         let slice_capacity = k.get() * generation_size.get();
         let slice_bits = f64::ceil(LOG2_E * slice_capacity as f64) as usize;
         let buf_len = ((k.get() + l.get()) * slice_bits).next_multiple_of(8) / 8;
+        debug_assert_ne!(seeds.0, seeds.1, "hash functions are not independent");
 
         Self {
             k,
@@ -89,7 +107,7 @@ impl<T> AgePartionedBloomFilter<T> {
             buf: vec![0u8; buf_len],
             slice_bits,
             index: 0,
-            seeds: (Seed(42), Seed(24)),
+            seeds,
             marker: PhantomData,
         }
     }
@@ -128,9 +146,8 @@ impl<T> AgePartionedBloomFilter<T> {
     {
         self.refresh();
 
-        debug_assert_ne!(self.seeds.0, self.seeds.1, "not independent hash functions");
-        let h1 = self.seeds.0.builder().hash_one(value) as usize;
-        let h2 = self.seeds.1.builder().hash_one(value) as usize;
+        let h1 = FixedState::with_seed(self.seeds.0).hash_one(value) as usize;
+        let h2 = FixedState::with_seed(self.seeds.1).hash_one(value) as usize;
 
         let mut matches = 0;
         for i in 0..self.slices() {
@@ -178,9 +195,8 @@ impl<T> AgePartionedBloomFilter<T> {
 
         self.inserts += 1;
 
-        debug_assert_ne!(self.seeds.0, self.seeds.1, "not independent hash functions");
-        let h1 = self.seeds.0.builder().hash_one(value) as usize;
-        let h2 = self.seeds.1.builder().hash_one(value) as usize;
+        let h1 = FixedState::with_seed(self.seeds.0).hash_one(value) as usize;
+        let h2 = FixedState::with_seed(self.seeds.1).hash_one(value) as usize;
 
         for k in 0..self.k.get() {
             let i = (self.index + k) % self.slices();
@@ -261,7 +277,7 @@ mod tests {
 
     #[test]
     fn simple_query() {
-        let mut f = AgePartionedBloomFilter::<i32>::new(
+        let mut f = Filter::new(
             NonZeroUsize::new(10).unwrap(),
             NonZeroUsize::new(7).unwrap(),
             NonZeroUsize::new(5).unwrap(),
@@ -278,7 +294,7 @@ mod tests {
 
     #[test]
     fn eviction_by_expiration() {
-        let mut f = AgePartionedBloomFilter::<i32>::with_refresh(
+        let mut f = Filter::with_refresh(
             NonZeroUsize::new(3).unwrap(),
             NonZeroUsize::new(6).unwrap(),
             NonZeroUsize::new(10).unwrap(),
@@ -296,12 +312,26 @@ mod tests {
     }
 
     #[test]
-    fn eviction_by_shifting() {
-        let mut f = AgePartionedBloomFilter::<i32>::new(
+    #[should_panic]
+    fn independent_hash_functions() {
+        let _ = Filter::with_seeds(
             NonZeroUsize::new(3).unwrap(),
             NonZeroUsize::new(3).unwrap(),
             NonZeroUsize::new(10).unwrap(),
+            (0, 0),
         );
+    }
+
+    #[test]
+    fn eviction_by_shifting() {
+        let mut f = Filter::with_seeds(
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(10).unwrap(),
+            (242172723362370165, 13983858096878473958),
+        );
+
+        eprintln!("seed ({}, {})", f.seeds.0, f.seeds.1);
 
         f.insert(&0);
         assert!(f.contains(&0), "item should not be evicted after insertion");
@@ -316,7 +346,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn snapshot() {
-        let mut f = AgePartionedBloomFilter::<i32>::new(
+        let mut f = Filter::new(
             NonZeroUsize::new(3).unwrap(),
             NonZeroUsize::new(3).unwrap(),
             NonZeroUsize::new(10).unwrap(),
@@ -327,8 +357,7 @@ mod tests {
         let mut network = Vec::<u8>::new();
         ciborium::into_writer(&f, &mut network).unwrap();
 
-        let mut copy: AgePartionedBloomFilter<u8> =
-            ciborium::from_reader(network.as_slice()).unwrap();
+        let mut copy: Filter = ciborium::from_reader(network.as_slice()).unwrap();
         assert!(copy.contains(&0), "item must be present in copy");
     }
 }
