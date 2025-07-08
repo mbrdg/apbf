@@ -2,6 +2,11 @@
 name = "apbf"
 version = "0.1.0"
 edition = "2024"
+description = "An implementation of an Age-Partioned Bloom Filter"
+license = "MIT"
+repository = "https://github.com/mbrdg/apbf"
+keywords = ["bloom", "filter", "age-partioned", "refresh"]
+categories = ["data-structures"]
 
 [dependencies]
 foldhash = "0.1.5"
